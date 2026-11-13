@@ -160,7 +160,22 @@ table.grid { border-collapse: collapse; table-layout: fixed; user-select: none; 
 .grid td.day.edit { cursor: cell; }
 .grid td.day.edit.has { cursor: pointer; }
 .grid td.day.sel { background: var(--sel) !important; background-image: none !important; }
-.empty-state { padding: 40px; text-align: center; color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+/* Hours month grid: start over end time in each cell. */
+.hours-month td.person { height: 34px; }
+.hours-month td.hm {
+  cursor: pointer; text-align: center; font-size: 10px; line-height: 1.15; color: var(--muted);
+  font-variant-numeric: tabular-nums; position: relative; padding: 0;
+}
+.hours-month td.hm span { display: block; }
+.hours-month td.hm span:first-child { color: var(--text); }
+.hours-month td.hm.shift span { font-weight: 700; color: var(--accent-text); }
+.hours-month td.hm i { position: absolute; top: 1px; right: 2px; font-style: normal; font-size: 9px; color: var(--muted); }
+.hours-month td.hm:hover, .hours-month td.cov-day:hover { outline: 2px solid var(--accent); outline-offset: -2px; }
+.hours-month tr.cov-row td { height: 30px; border-top: 2px solid var(--line-strong); }
+.hours-month td.cov-day { text-align: center; cursor: pointer; padding: 3px 2px; }
+.hours-month td.cov-day span { display: block; border-radius: 4px; font-size: 11px; font-weight: 600; line-height: 22px; }
+.shift-key { color: var(--accent-text); }
+.empty-state {padding: 40px; text-align: center; color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
 .empty-state .btn { margin-top: 12px; }
 
 .legend { display: flex; gap: 16px; flex-wrap: wrap; padding: 6px 20px 24px; color: var(--muted); font-size: 12px; }

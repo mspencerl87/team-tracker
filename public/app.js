@@ -47,7 +47,13 @@ function isoWeek(s) {
 const WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const monthOf = (s) => MON[Number(s.slice(5, 7)) - 1];
-const niceDate = (s) => `${WD[weekday(s)]} ${Number(s.slice(8))} ${monthOf(s)}`;
+const firstOfMonth = (s) => s.slice(0, 8) + '01';
+function addMonths(s, n) {
+  const [y, m] = s.split('-').map(Number);
+  const t = new Date(Date.UTC(y, m - 1 + n, 1));
+  return fmtD(t.getTime());
+}
+const niceDate = (s) =>`${WD[weekday(s)]} ${Number(s.slice(8))} ${monthOf(s)}`;
 
 // ---------- time-zone helpers ----------
 
@@ -119,6 +125,8 @@ const state = {
   search: '',
   anchor: null,
   hoursDate: null,
+  calSpan: store('calSpan') === 'month' ? 'month' : 'weeks', // Calendar: weeks | month
+  hrsSpan: store('hrsSpan') === 'month' ? 'month' : 'day',   // Hours: day | month
 };
 try { (JSON.parse(store('sel') || '[]') || []).forEach((v) => state.selected.add(v)); } catch { /* ignore */ }
 const viewerToday = () => dateIn(state.viewerTz, Date.now());
@@ -278,19 +286,24 @@ function cellStyle(entries, base) {
   return `background-image:${mask ? mask + ',' : ''}${fill}`;
 }
 
-async function renderCalendar() {
-  const view = $('#view');
+// The days a grid shows and how wide each column is. Weeks: as many days as
+// fit at 26px, from the Monday before the anchor's week. Month: exactly the
+// anchor's month, columns stretched to fill the width (min `minCell`).
+function gridDays(anchor, month, minCell = 26) {
   const nameW = window.innerWidth < 760 ? 150 : 220;
-  const n = Math.max(14, Math.floor((view.clientWidth - 40 - nameW - 4) / 26));
-  const start = addDays(mondayOf(state.anchor), -7);
-  const days = Array.from({ length: n }, (_, i) => addDays(start, i));
-  const end = days[days.length - 1];
-  await loadTimeOff(start, end);
+  const avail = $('#view').clientWidth - 40 - nameW - 4;
+  if (month) {
+    const start = firstOfMonth(anchor);
+    const n = dayDiff(start, addMonths(start, 1));
+    return { days: Array.from({ length: n }, (_, i) => addDays(start, i)), cellW: Math.max(minCell, Math.floor(avail / n)) };
+  }
+  const n = Math.max(14, Math.floor(avail / minCell));
+  const start = addDays(mondayOf(anchor), -7);
+  return { days: Array.from({ length: n }, (_, i) => addDays(start, i)), cellW: minCell };
+}
+
+function gridHead(days, cellW, corner) {
   const today = viewerToday();
-  const secs = sections();
-
-  if (!state.data.people.length) return renderEmpty();
-
   // Week header: one cell per (partial) ISO week.
   const weeks = [];
   for (const d of days) {
@@ -307,6 +320,27 @@ async function renderCalendar() {
     const wd = weekday(d);
     return `<th class="${wd === 0 || wd === 6 ? 'weekend' : ''} ${d === today ? 'today' : ''}"><small>${WD[wd][0]}</small><span>${Number(d.slice(8))}</span></th>`;
   }).join('');
+  return `<colgroup><col class="name">${`<col class="day" style="width:${cellW}px">`.repeat(days.length)}</colgroup>
+    <thead>
+      <tr class="wk"><th class="corner" rowspan="2">${esc(corner)}</th>${wkHead}</tr>
+      <tr class="days">${dayHead}</tr>
+    </thead>`;
+}
+
+const monthTitle = (s) => new Date(parseD(s)).toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' });
+
+async function renderCalendar() {
+  const view = $('#view');
+  const month = state.calSpan === 'month';
+  const { days, cellW } = gridDays(state.anchor, month);
+  const n = days.length;
+  const start = days[0];
+  const end = days[n - 1];
+  await loadTimeOff(start, end);
+  const today = viewerToday();
+  const secs = sections();
+
+  if (!state.data.people.length) return renderEmpty();
 
   let body = '';
   for (const sec of secs) {
@@ -327,11 +361,7 @@ async function renderCalendar() {
   if (!secs.length) body = `<tr><td colspan="${n + 1}" class="person" style="text-align:center;color:var(--muted);height:60px">No one matches the current filter.</td></tr>`;
 
   view.innerHTML = `<div class="grid-wrap"><table class="grid">
-    <colgroup><col class="name">${'<col class="day">'.repeat(n)}</colgroup>
-    <thead>
-      <tr class="wk"><th class="corner" rowspan="2">${esc(niceDate(start))} – ${esc(niceDate(end))}</th>${wkHead}</tr>
-      <tr class="days">${dayHead}</tr>
-    </thead>
+    ${gridHead(days, cellW, month ? monthTitle(start) : `${niceDate(start)} – ${niceDate(end)}`)}
     <tbody>${body}</tbody></table></div>`;
   renderLegend(true);
 }
@@ -360,7 +390,87 @@ function renderLegend(show) {
 
 // ---------- hours view ----------
 
+// Short clock time in the viewer's zone: "05", "05:30"; the day's end is "24".
+function shortTime(ms, dayEnd) {
+  if (ms >= dayEnd) return '24';
+  const w = wall(state.viewerTz, ms);
+  return pad(w.h) + (w.mi ? ':' + pad(w.mi) : '');
+}
+
+// Month of working hours: one cell per person per day (the viewer's days),
+// holding when they work in the viewer's time, so DST changes on either side
+// show up as cells that differ from the person's usual hours.
+async function renderHoursMonth() {
+  const tz = state.viewerTz;
+  const { days, cellW } = gridDays(state.hoursDate, true, 34);
+  await loadTimeOff(addDays(days[0], -2), addDays(days[days.length - 1], 2));
+  if (!state.data.people.length) return renderEmpty();
+  const today = viewerToday();
+  const secs = sections();
+  const bounds = days.map((d) => [zonedToUtc(d, '00:00', tz), zonedToUtc(addDays(d, 1), '00:00', tz)]);
+
+  const seen = new Set();
+  const working = days.map(() => new Set());
+  let body = '';
+  for (const sec of secs) {
+    body += `<tr class="section"><td colspan="${days.length + 1}">${esc(sec.title)}</td></tr>`;
+    for (const p of sec.people) {
+      const cells = days.map((d, i) => {
+        const [a, b] = bounds[i];
+        const { work, off } = personDay(p, a, b);
+        if (work.length) working[i].add(p.id);
+        // A shift crossing midnight in your time splits into two pieces on
+        // one day; show the longest (the tooltip lists all) rather than a
+        // misleading earliest-start/latest-end.
+        const main = work.reduce((m, w) => (!m || w[1] - w[0] > m[1] - m[0] ? w : m), null);
+        // Hour offset between them and you at midday: it moves when one side
+        // changes for daylight saving and the other hasn't yet.
+        const mid = (a + b) / 2;
+        const gap = offsetMs(p.timezone, mid) - offsetMs(tz, mid);
+        return { d, work, off, gap, start: main ? shortTime(main[0], b) : '', end: main ? shortTime(main[1], b) : '' };
+      });
+      const counts = {};
+      for (const c of cells) counts[c.gap] = (counts[c.gap] || 0) + 1;
+      const usualGap = Number(Object.entries(counts).sort((x, y) => y[1] - x[1])[0]?.[0]);
+      seen.add(p.id);
+      body += `<tr><td class="person" data-person="${p.id}"><span class="dot ${statusNow(p)}"></span><span class="pname">${esc(p.name)}</span><span class="plocal">${esc(diffLabel(p.timezone))}</span></td>`;
+      for (const c of cells) {
+        const entry = c.off[0]?.[2];
+        const color = entry ? typeById(entry.type_id)?.color || '#888888' : null;
+        const allOff = entry && !c.work.length;
+        const cls = ['day', 'hm', !c.work.length && !entry && 'off', c.d === today && 'today', c.start && c.gap !== usualGap && 'shift'].filter(Boolean).join(' ');
+        let style = '';
+        if (allOff) style = `background:${entry.status === 'pending' ? `repeating-linear-gradient(135deg, ${color} 0 4px, ${color}55 4px 8px)` : color}`;
+        else if (entry) style = `box-shadow: inset 0 -4px 0 ${color}`;
+        const text = c.work.length ? `<span>${c.start}</span><span>${c.end}</span>${c.work.length > 1 ? '<i>+</i>' : ''}` : '';
+        body += `<td class="${cls}" data-hm="${p.id}" data-d="${c.d}" style="${style}">${text}</td>`;
+      }
+      body += '</tr>';
+    }
+  }
+  if (!secs.length) body = `<tr><td colspan="${days.length + 1}" class="person" style="text-align:center;color:var(--muted);height:60px">No one matches the current filter.</td></tr>`;
+  const max = Math.max(1, ...working.map((s) => s.size));
+  const cov = working.map((s, i) => `<td class="day cov-day" data-d="${days[i]}" title="${s.size} of ${seen.size} working"><span style="background:color-mix(in srgb, var(--accent) ${Math.round((s.size / max) * 70)}%, transparent)">${s.size}</span></td>`).join('');
+
+  $('#view').innerHTML = `<div class="grid-wrap"><table class="grid hours-month">
+    ${gridHead(days, cellW, `${monthTitle(days[0])} · your time`)}
+    <tbody>${body}<tr class="cov-row"><td class="person"><b>Coverage</b></td>${cov}</tr></tbody></table></div>
+    <p class="hours-note">Working hours in your time (${esc(tzAbbr(tz))}), start over end; + = more hours that day (hover to see). <b class="shift-key">Bold</b> = an hour off from usual because only one side has changed for daylight saving. A colored bar = part of the day off. Click a day for its timeline.</p>`;
+  renderLegend(true);
+}
+
+// Tooltip for a cell of the month grid.
+function describeHoursCell(p, d) {
+  const tz = state.viewerTz;
+  const a = zonedToUtc(d, '00:00', tz), b = zonedToUtc(addDays(d, 1), '00:00', tz);
+  const { work, off } = personDay(p, a, b);
+  const spans = work.map(([s, e]) => `<div>${fmtTime(s, tz)}–${fmtTime(e, tz)} yours <span class="tl">(${fmtTime(s, p.timezone)}–${fmtTime(e, p.timezone)} theirs)</span></div>`).join('');
+  const offs = [...new Map(off.map((o) => [o[2].id, o[2]])).values()].map((e) => `<div class="tl">${esc(typeById(e.type_id)?.name || 'Off')}${e.status === 'pending' ? ' (pending)' : ''}</div>`).join('');
+  return `<b>${esc(p.name)}</b><div>${esc(niceDate(d))}</div>${spans || '<div class="tl">Not working</div>'}${offs}`;
+}
+
 async function renderHours() {
+  if (state.hrsSpan === 'month') return renderHoursMonth();
   const tz = state.viewerTz;
   const day = state.hoursDate;
   const a = zonedToUtc(day, '00:00', tz);
@@ -699,6 +809,13 @@ let drag = null;
 $('#view').addEventListener('pointerdown', (ev) => {
   const td = ev.target.closest('td.day');
   if (!td || ev.button !== 0) return;
+  // Hours month grid: a day opens that day's timeline.
+  if (td.dataset.hm || td.classList.contains('cov-day')) {
+    state.hrsSpan = 'day'; store('hrsSpan', 'day');
+    state.hoursDate = td.dataset.d;
+    render();
+    return;
+  }
   if (td.dataset.e) { drag = { entry: Number(td.dataset.e) }; return; }
   if (!canEditPerson(td.dataset.p)) return;
   drag = { person: td.dataset.p, from: td.dataset.d, to: td.dataset.d };
@@ -764,20 +881,24 @@ function describePerson(p) {
 const tip = $('#tooltip');
 document.addEventListener('pointermove', (ev) => {
   if (drag) { tip.hidden = true; return; }
-  const el = ev.target.closest?.('[data-e],[data-person]');
+  const el = ev.target.closest?.('[data-e],[data-person],[data-hm]');
   if (!el || !$('#view').contains(el)) { tip.hidden = true; return; }
-  let html = '';
-  if (el.dataset.e) {
-    const e = state.timeOff.find((x) => x.id === Number(el.dataset.e));
-    if (e) html = describeEntry(e);
-  } else {
-    const p = personById(Number(el.dataset.person));
-    if (p) html = describePerson(p);
-  }
-  if (!html) { tip.hidden = true; return; }
-  if (tip.dataset.key !== (el.dataset.e || 'p' + el.dataset.person)) {
+  const key = el.dataset.hm ? `h${el.dataset.hm}/${el.dataset.d}` : el.dataset.e || 'p' + el.dataset.person;
+  if (tip.dataset.key !== key) {
+    let html = '';
+    if (el.dataset.hm) {
+      const p = personById(Number(el.dataset.hm));
+      if (p) html = describeHoursCell(p, el.dataset.d);
+    } else if (el.dataset.e) {
+      const e = state.timeOff.find((x) => x.id === Number(el.dataset.e));
+      if (e) html = describeEntry(e);
+    } else {
+      const p = personById(Number(el.dataset.person));
+      if (p) html = describePerson(p);
+    }
+    if (!html) { tip.hidden = true; return; }
     tip.innerHTML = html;
-    tip.dataset.key = el.dataset.e || 'p' + el.dataset.person;
+    tip.dataset.key = key;
   }
   tip.hidden = false;
   const r = tip.getBoundingClientRect();
@@ -793,6 +914,11 @@ document.addEventListener('pointermove', (ev) => {
 function render() {
   for (const b of $$('#tabs button')) b.classList.toggle('active', b.dataset.view === state.view);
   for (const b of $$('#modeSeg button')) b.classList.toggle('active', b.dataset.mode === state.mode);
+  const monthOn = state.view === 'hours' ? state.hrsSpan === 'month' : state.calSpan === 'month';
+  const [shortBtn, monthBtn] = $$('#spanSeg button');
+  shortBtn.textContent = state.view === 'hours' ? 'Day' : 'Weeks';
+  shortBtn.classList.toggle('active', !monthOn);
+  monthBtn.classList.toggle('active', monthOn);
   document.body.classList.toggle('can-edit', state.isAdmin);
   $('#toolbar').hidden = state.view === 'manage';
   $('#datePick').value = state.view === 'hours' ? state.hoursDate : state.anchor;
@@ -852,10 +978,17 @@ $('#datePick').addEventListener('change', (ev) => {
   render();
 });
 function step(dir) {
-  if (state.view === 'hours') state.hoursDate = addDays(state.hoursDate, dir);
-  else state.anchor = addDays(state.anchor, dir * 7);
+  if (state.view === 'hours') state.hoursDate = state.hrsSpan === 'month' ? addMonths(state.hoursDate, dir) : addDays(state.hoursDate, dir);
+  else state.anchor = state.calSpan === 'month' ? addMonths(state.anchor, dir) : addDays(state.anchor, dir * 7);
   render();
 }
+$('#spanSeg').addEventListener('click', (ev) => {
+  const s = ev.target.dataset.span;
+  if (!s) return;
+  if (state.view === 'hours') { state.hrsSpan = s === 'month' ? 'month' : 'day'; store('hrsSpan', state.hrsSpan); }
+  else { state.calSpan = s === 'month' ? 'month' : 'weeks'; store('calSpan', state.calSpan); }
+  render();
+});
 $('#prevBtn').addEventListener('click', () => step(-1));
 $('#nextBtn').addEventListener('click', () => step(1));
 document.addEventListener('keydown', (ev) => {
@@ -904,7 +1037,7 @@ $('#loginForm').addEventListener('submit', async (ev) => {
 let resizeTimer;
 window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => { if (state.view === 'calendar') render(); }, 150);
+  resizeTimer = setTimeout(() => { if (state.view !== 'manage') render(); }, 150);
 });
 
 // Refresh the "working now" dots, local clocks and other people's edits.

@@ -8,10 +8,13 @@ one Docker container with a SQLite file for storage.
   or group. Time off is colored by type; half days, specific hours and
   pending requests have their own look; each person's non-working days are
   shaded. Drag across days to add time off, click an entry to edit it.
+  **Weeks** shows a rolling range; **Month** shows exactly one month.
 - **Hours**: one day as a 24-hour timeline **in your time zone**, with each
   person's work hours converted from theirs, their time off, a "now" line
   and a coverage row showing how many people are working each half hour
-  (plus the best overlap window).
+  (plus the best overlap window). **Month** shows a person × day grid of
+  working hours in your time with daily coverage; days that are an hour
+  off because only one side has changed for daylight saving are in bold.
 - **Time zones**: everyone has a home zone. Their work hours and days off
   are stored in it (a day off in Paris is the Paris day); everything shown
   as a clock time is converted to the viewer's zone, which defaults to the

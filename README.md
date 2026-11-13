@@ -21,10 +21,11 @@ one Docker container with a SQLite file for storage.
 - **Manage**: people (zone, department, groups, weekly hours, including
   night shifts that run past midnight), departments, groups and time-off
   types with their colors.
-- **Sign-in**: anyone can view without signing in. People sign in with your
-  company's OIDC provider (Google Workspace, Microsoft Entra, Authentik,
-  Keycloak...), limited to your email domains, and then edit their own
-  profile and time off. Admins edit everything.
+- **Sign-in**: anyone can view without signing in. People sign in with
+  their Matrix account (homeservers using Matrix Authentication Service,
+  set up automatically) or your company's OIDC provider (Google Workspace,
+  Microsoft Entra, Authentik, Keycloak...) limited to your email domains,
+  and then edit their own profile and time off. Admins edit everything.
 
 ## Run it
 
@@ -41,7 +42,9 @@ Put them in a `.env` next to `docker-compose.yml` (start from `.env.example`).
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `PUBLIC_URL` | | The address people open, e.g. `https://team.example.com`. Required with OIDC. |
+| `PUBLIC_URL` | | The address people open, e.g. `https://team.example.com`. Required with sign-in. |
+| `MATRIX_SERVER_NAME` | | Sign in with Matrix: the domain in your Matrix IDs, e.g. `https://example.com`. Use this **or** the `OIDC_*` settings. |
+| `ADMIN_USER_IDS` | | Matrix IDs (`@you:example.com`) made admins when they sign in. Same as `ADMIN_EMAILS`, which accepts Matrix IDs too. |
 | `OIDC_ISSUER` | | Your provider's issuer URL (see below). Setting it and `OIDC_CLIENT_ID` turns on sign-in. |
 | `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` | | From the app registration at your provider. |
 | `OIDC_LABEL` | `Sign in with SSO` | Text on the sign-in button. |
@@ -78,8 +81,30 @@ browser's time zone with Mon–Fri 09:00–17:00 hours for them to adjust under
 
 ### Setting up sign-in
 
-Register a web application with your provider, with redirect URI
-`PUBLIC_URL/auth/callback` (e.g. `https://team.example.com/auth/callback`).
+**Matrix (Matrix Authentication Service)**: if your homeserver uses MAS
+(its `.well-known/matrix/client` has `org.matrix.msc2965.authentication`),
+there's nothing to register by hand:
+
+```
+PUBLIC_URL=https://team.example.com
+MATRIX_SERVER_NAME=https://example.com
+ADMIN_USER_IDS=@you:example.com
+```
+
+On the first sign-in Team Tracker finds the login server from
+`MATRIX_SERVER_NAME`, registers itself as a client there, and saves that
+in `oauth_client.json` in the data volume (it registers again if
+`PUBLIC_URL` changes; delete the file and restart to force it). It asks only
+for `openid email`: it learns who you are and your email, gets no access to
+your messages or rooms, and adds no device to your account. Anyone with an
+account on the homeserver can sign in; set `ALLOWED_EMAIL_DOMAINS` as well
+to also require an email address at those domains on the account. People
+start with a name made from their user ID (`@jane.doe` → "Jane Doe"),
+which they can change under My profile.
+
+**Other OIDC providers**: register a web application with your provider,
+with redirect URI `PUBLIC_URL/auth/callback`
+(e.g. `https://team.example.com/auth/callback`).
 
 **Google Workspace**: Google Cloud console → APIs & Services → OAuth consent
 screen, user type **Internal** (only your Workspace can sign in), then

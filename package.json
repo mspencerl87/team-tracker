@@ -1,0 +1,20 @@
+{
+  "name": "team-tracker",
+  "version": "0.1.0",
+  "description": "Self-hosted team availability, work hours and time-off planner that shows everyone's hours in the viewer's time zone.",
+  "license": "AGPL-3.0-only",
+  "private": true,
+  "type": "commonjs",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "check": "node --check src/server.js && node --check src/db.js && node --check public/app.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.5.0",
+    "express": "^4.21.1"
+  }
+}

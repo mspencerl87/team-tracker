@@ -1,0 +1,18 @@
+services:
+  team-tracker:
+    build: .
+    image: team-tracker:latest
+    container_name: team-tracker
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # Leave empty to let anyone who can open the page edit (trusted LAN only).
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # Set to a long random string to keep admin logins across restarts.
+      SESSION_SECRET: ${SESSION_SECRET:-}
+    volumes:
+      - team-tracker-data:/data
+
+volumes:
+  team-tracker-data:

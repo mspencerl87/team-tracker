@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Spencer LeBlanc
 
+const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const express = require('express');
 const db = require('./db');
 const { cfg, auth, canEditPerson, requireAdmin, requireSignedIn, routes: authRoutes } = require('./auth');
@@ -335,7 +337,22 @@ app.post('/api/demo', requireAdmin, handle(() => db.transaction(() => {
 
 app.get('/healthz', (req, res) => res.send('ok'));
 
-app.use(express.static(path.join(__dirname, '..', 'public'), { maxAge: 0 }));
+// The page links its script and stylesheet with a hash of their contents
+// (app.js?v=1a2b3c), so after an update browsers and proxies fetch the new
+// files instead of running a cached old app.js against the new page (seen
+// live: the 0.4.0 Month button did nothing until a hard refresh). The page
+// itself is never cached, so it always carries the current hashes.
+const PUBLIC = path.join(__dirname, '..', 'public');
+const hashOf = (file) => crypto.createHash('sha256').update(fs.readFileSync(path.join(PUBLIC, file))).digest('hex').slice(0, 12);
+const indexHtml = fs.readFileSync(path.join(PUBLIC, 'index.html'), 'utf8')
+  .replace('href="style.css"', `href="style.css?v=${hashOf('style.css')}"`)
+  .replace('src="app.js"', `src="app.js?v=${hashOf('app.js')}"`);
+app.get(['/', '/index.html'], (req, res) => {
+  res.set('Cache-Control', 'no-cache');
+  res.type('html').send(indexHtml);
+});
+
+app.use(express.static(PUBLIC, { maxAge: 0, index: false }));
 
 app.listen(PORT, () => {
   const how = cfg.open ? 'open editing: set up OIDC or ADMIN_PASSWORD to restrict'

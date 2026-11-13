@@ -7,6 +7,9 @@ const crypto = require('crypto');
 const express = require('express');
 const db = require('./db');
 const { cfg, auth, canEditPerson, requireAdmin, requireSignedIn, routes: authRoutes } = require('./auth');
+const holidays = require('./holidays');
+
+const dayCount = (a, b) => Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 86400e3);
 
 const PORT = Number(process.env.PORT) || 8080;
 
@@ -115,8 +118,25 @@ function loadPeople(showEmail) {
     active: Boolean(p.active),
     schedule: JSON.parse(p.schedule),
     group_ids: byPerson.get(p.id) || [],
+    // holidays is the stored setting (null = from time zone); holiday_key what applies.
+    holiday_key: holidays.effectiveKey(p.holidays, p.timezone),
   }));
 }
+
+// { "US": [{date, name}], "FR": [...] } for every holiday key in use.
+app.get('/api/holidays', handle((req) => {
+  const from = date(req.query.from, 'from');
+  const to = date(req.query.to, 'to');
+  if (dayCount(from, to) > 800) throw new BadRequest('Range too long.');
+  const keys = new Set(db.prepare('SELECT holidays, timezone FROM people WHERE active = 1').all()
+    .map((p) => holidays.effectiveKey(p.holidays, p.timezone)).filter(Boolean));
+  return Object.fromEntries([...keys].map((k) => [k, holidays.between(k, from, to)]));
+}));
+
+// Countries, or one country's states/regions, for the holiday picker.
+app.get('/api/holiday-options', handle((req) => (req.query.country
+  ? holidays.regions(String(req.query.country).toUpperCase())
+  : holidays.countries())));
 
 app.get('/api/data', handle((req) => ({
   departments: db.prepare('SELECT * FROM departments ORDER BY name COLLATE NOCASE').all(),
@@ -160,6 +180,14 @@ app.delete('/api/leave-types/:id', requireAdmin, handle((req) => {
 
 // ---------- people ----------
 
+function holidaySetting(v) {
+  if (v === null || v === undefined) return null; // from time zone
+  if (v === '') return '';                         // none
+  const key = String(v).toUpperCase();
+  if (!holidays.validKey(key)) throw new BadRequest(`Unknown holiday country/region: ${v}`);
+  return key;
+}
+
 function personFields(body) {
   return {
     name: str(body.name, 'Name', { max: 120 }),
@@ -168,6 +196,7 @@ function personFields(body) {
     timezone: timezone(body.timezone),
     schedule: JSON.stringify(body.schedule ? schedule(body.schedule) : DEFAULT_SCHEDULE),
     active: body.active === false ? 0 : 1,
+    holidays: holidaySetting(body.holidays),
   };
 }
 
@@ -179,8 +208,8 @@ function setGroups(personId, groupIds) {
 
 app.post('/api/people', requireAdmin, handle((req) => db.transaction(() => {
   const f = personFields(req.body);
-  const info = db.prepare(`INSERT INTO people (name, email, department_id, timezone, schedule, active)
-    VALUES (@name, @email, @department_id, @timezone, @schedule, @active)`).run(f);
+  const info = db.prepare(`INSERT INTO people (name, email, department_id, timezone, schedule, active, holidays)
+    VALUES (@name, @email, @department_id, @timezone, @schedule, @active, @holidays)`).run(f);
   setGroups(info.lastInsertRowid, req.body.group_ids);
   return { id: info.lastInsertRowid };
 })()));
@@ -195,7 +224,7 @@ app.put('/api/people/:id', requireSignedIn, handle((req) => db.transaction(() =>
   const f = { ...personFields(req.body), id: pid };
   if (!auth(req).admin) { f.email = current.email; f.active = current.active; }
   db.prepare(`UPDATE people SET name = @name, email = @email, department_id = @department_id,
-    timezone = @timezone, schedule = @schedule, active = @active WHERE id = @id`).run(f);
+    timezone = @timezone, schedule = @schedule, active = @active, holidays = @holidays WHERE id = @id`).run(f);
   setGroups(f.id, req.body.group_ids);
 })()));
 

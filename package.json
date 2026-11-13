@@ -1,6 +1,6 @@
 {
   "name": "team-tracker",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Self-hosted team availability, work hours and time-off planner that shows everyone's hours in the viewer's time zone.",
   "license": "AGPL-3.0-only",
   "private": true,
@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^11.5.0",
+    "date-holidays": "^3.39.1",
     "express": "^4.21.1",
     "openid-client": "^5.7.1"
   }

@@ -89,6 +89,11 @@ const MIGRATIONS = [
   );
   CREATE UNIQUE INDEX users_person ON users(person_id) WHERE person_id IS NOT NULL;
   `,
+  // Public holidays: NULL = the country of their time zone, '' = none,
+  // else "FR" or "US-CA" (see holidays.js).
+  `
+  ALTER TABLE people ADD COLUMN holidays TEXT;
+  `,
 ];
 
 function migrate() {

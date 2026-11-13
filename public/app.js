@@ -150,6 +150,13 @@ state.hoursDate = viewerToday();
 const canEditPerson = (pid) => state.isAdmin || (state.me?.person_id != null && state.me.person_id === Number(pid));
 const canEditAnyone = () => state.isAdmin || state.me?.person_id != null;
 const typeById = (id) => state.data.leaveTypes.find((t) => t.id === id);
+// An entry's type; holidays use the "Public holiday" type's color if it still exists.
+function typeOf(e) {
+  if (!e.holiday) return typeById(e.type_id);
+  const t = state.data.leaveTypes.find((x) => /holiday/i.test(x.name));
+  return { name: e.name, color: t?.color || '#94a3b8' };
+}
+const entryById = (id) => state.timeOff.find((e) => String(e.id) === String(id));
 const personById = (id) => state.data.people.find((p) => p.id === id);
 
 async function loadData() {
@@ -161,8 +168,19 @@ async function loadData() {
   for (const v of state.selected) if (!valid.has(v)) state.selected.delete(v);
 }
 
+// Public holidays come in as read-only full-day entries (id "h:<person>:<date>"),
+// after a person's own time off, so every view treats them like a day off.
 async function loadTimeOff(from, to) {
-  state.timeOff = await api('GET', `/api/time-off?from=${from}&to=${to}`);
+  const [own, hols] = await Promise.all([
+    api('GET', `/api/time-off?from=${from}&to=${to}`),
+    api('GET', `/api/holidays?from=${from}&to=${to}`).catch(() => ({})),
+  ]);
+  state.timeOff = own;
+  for (const p of state.data.people) {
+    for (const h of hols[p.holiday_key] || []) {
+      state.timeOff.push({ id: `h:${p.id}:${h.date}`, holiday: true, name: h.name, person_id: p.id, start_date: h.date, end_date: h.date, part: 'full', status: 'approved' });
+    }
+  }
   state.offIdx = new Map();
   for (const e of state.timeOff) {
     if (!state.offIdx.has(e.person_id)) state.offIdx.set(e.person_id, new Map());
@@ -287,7 +305,7 @@ function renderFilter() {
 function cellStyle(entries, base) {
   if (!entries.length) return '';
   const e = entries[0];
-  const c = typeById(e.type_id)?.color || '#888888';
+  const c = typeOf(e)?.color || '#888888';
   const fill = e.status === 'pending'
     ? `repeating-linear-gradient(135deg, ${c} 0 4px, ${c}55 4px 8px)`
     : `linear-gradient(${c}, ${c})`;
@@ -449,7 +467,7 @@ async function renderHoursMonth() {
       body += `<tr><td class="person" data-person="${p.id}"><span class="dot ${statusNow(p)}"></span><span class="pname">${esc(p.name)}</span><span class="plocal">${esc(diffLabel(p.timezone))}</span></td>`;
       for (const c of cells) {
         const entry = c.off[0]?.[2];
-        const color = entry ? typeById(entry.type_id)?.color || '#888888' : null;
+        const color = entry ? typeOf(entry)?.color || '#888888' : null;
         const allOff = entry && !c.work.length;
         const cls = ['day', 'hm', !c.work.length && !entry && 'off', c.d === today && 'today', c.start && c.gap !== usualGap && 'shift'].filter(Boolean).join(' ');
         let style = '';
@@ -478,7 +496,7 @@ function describeHoursCell(p, d) {
   const a = zonedToUtc(d, '00:00', tz), b = zonedToUtc(addDays(d, 1), '00:00', tz);
   const { work, off } = personDay(p, a, b);
   const spans = work.map(([s, e]) => `<div>${fmtTime(s, tz)}–${fmtTime(e, tz)} yours <span class="tl">(${fmtTime(s, p.timezone)}–${fmtTime(e, p.timezone)} theirs)</span></div>`).join('');
-  const offs = [...new Map(off.map((o) => [o[2].id, o[2]])).values()].map((e) => `<div class="tl">${esc(typeById(e.type_id)?.name || 'Off')}${e.status === 'pending' ? ' (pending)' : ''}</div>`).join('');
+  const offs = [...new Map(off.map((o) => [o[2].id, o[2]])).values()].map((e) => `<div class="tl">${esc(typeOf(e)?.name || 'Off')}${e.status === 'pending' ? ' (pending)' : ''}</div>`).join('');
   return `<b>${esc(p.name)}</b><div>${esc(niceDate(d))}</div>${spans || '<div class="tl">Not working</div>'}${offs}`;
 }
 
@@ -512,7 +530,7 @@ async function renderHours() {
       if (!seen.has(p.id)) { seen.add(p.id); workers.push(work); }
       let bars = '';
       for (const [s, e, entry] of off) {
-        const t = typeById(entry.type_id);
+        const t = typeOf(entry);
         const c = t?.color || '#888888';
         const bg = entry.status === 'pending' ? `repeating-linear-gradient(135deg, ${c} 0 5px, ${c}66 5px 10px)` : c;
         bars += `<div class="bar offbar" data-e="${entry.id}" style="left:${pct(s)}%;width:${pct(e) - pct(s)}%;background:${bg}">${esc(t?.name || 'Off')}</div>`;
@@ -618,7 +636,8 @@ async function renderManage() {
     <div><div class="card"><h3>People <span class="muted">${people.length}</span>${ro ? '' : '<button class="btn primary" id="addPerson">Add person</button>'}</h3>
       <table class="list"><thead><tr><th>Name</th><th>Department</th><th>Groups</th><th>Time zone</th><th>Work hours (their time)</th><th></th></tr></thead><tbody>
       ${people.map((p) => `<tr class="${p.active ? '' : 'inactive'}"><td>${esc(p.name)}${p.active ? '' : ' <span class="muted">(inactive)</span>'}</td><td>${esc(dep(p.department_id))}</td><td>${esc(grp(p.group_ids))}</td>
-        <td>${esc(p.timezone)} <span class="muted">${diffLabel(p.timezone)}</span></td><td>${scheduleSummary(p)}</td>
+        <td>${esc(p.timezone)} <span class="muted">${diffLabel(p.timezone)}</span>
+          <div class="muted" style="font-size:11px">Holidays: ${esc(p.holiday_key || 'none')}${p.holidays === null && p.holiday_key ? ' (from zone)' : ''}</div></td><td>${scheduleSummary(p)}</td>
         <td class="actions">${canEditPerson(p.id) ? `<button class="link" data-edit-person="${p.id}">Edit</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">No one yet</td></tr>'}
       </tbody></table></div>${usersCard()}</div>
     <div>
@@ -689,6 +708,42 @@ $('#view').addEventListener('click', (ev) => {
 let editingPerson = null;
 const SCHED_ORDER = [1, 2, 3, 4, 5, 6, 0];
 
+// Holiday picker: "auto" (country of their time zone), "none", or a country,
+// then optionally one of its states/regions. Stored as null / '' / "US-CA".
+let holCountries = null;
+const holRegions = new Map();
+async function fillHolidayPicker(p) {
+  const f = $('#personForm');
+  if (!holCountries) holCountries = await api('GET', '/api/holiday-options').catch(() => ({}));
+  const setting = p ? p.holidays : null;
+  const [country, region] = setting ? setting.split('-') : [];
+  const autoKey = p && setting === null ? p.holiday_key : '';
+  f.holCountry.innerHTML = `<option value="auto">From time zone${autoKey ? ` (${esc(holCountries[autoKey.split('-')[0]] || autoKey)})` : ''}</option><option value="none">None</option>` +
+    Object.entries(holCountries).sort((a, b) => a[1].localeCompare(b[1])).map(([c, n]) => `<option value="${c}">${esc(n)}</option>`).join('');
+  f.holCountry.value = setting === null ? 'auto' : setting === '' ? 'none' : country;
+  await fillRegions(region || '');
+}
+async function fillRegions(selected) {
+  const f = $('#personForm');
+  const c = f.holCountry.value;
+  let regions = {};
+  if (c.length === 2) {
+    if (!holRegions.has(c)) holRegions.set(c, await api('GET', `/api/holiday-options?country=${c}`).catch(() => ({})));
+    regions = holRegions.get(c);
+  }
+  const entries = Object.entries(regions).sort((a, b) => a[1].localeCompare(b[1]));
+  $('#holRegionLabel').hidden = !entries.length;
+  f.holRegion.innerHTML = '<option value="">Whole country</option>' + entries.map(([k, n]) => `<option value="${k}">${esc(n)}</option>`).join('');
+  f.holRegion.value = selected;
+}
+$('#personForm').holCountry.addEventListener('change', () => fillRegions(''));
+function holidayValue() {
+  const f = $('#personForm');
+  if (f.holCountry.value === 'auto') return null;
+  if (f.holCountry.value === 'none') return '';
+  return f.holCountry.value + (f.holRegion.value ? '-' + f.holRegion.value : '');
+}
+
 function openPerson(p) {
   editingPerson = p;
   const f = $('#personForm');
@@ -712,7 +767,7 @@ function openPerson(p) {
   // Email links a sign-in to this person, so only admins change it (or active).
   f.email.disabled = f.active.disabled = !state.isAdmin;
   $('#personDelete').hidden = !p || !state.isAdmin;
-  $('#personDlg').showModal();
+  fillHolidayPicker(p).finally(() => $('#personDlg').showModal());
 }
 
 $('#personSched').addEventListener('change', (ev) => {
@@ -743,6 +798,7 @@ $('#personForm').addEventListener('submit', async (ev) => {
   const body = {
     name: f.name.value, email: f.email.value, timezone: f.timezone.value.trim(),
     department_id: f.department_id.value || null, active: f.active.checked, schedule,
+    holidays: holidayValue(),
     group_ids: $$('#personGroups input:checked').map((i) => Number(i.value)),
   };
   try {
@@ -762,6 +818,7 @@ $('#personDelete').addEventListener('click', async () => {
 let editingOff = null;
 
 function openTimeOff(entry, defaults = {}) {
+  if (entry?.holiday) return; // read-only; the tooltip says what it is
   if (!entry && !canEditPerson(defaults.person_id)) return;
   editingOff = entry;
   const f = $('#offForm');
@@ -829,7 +886,8 @@ $('#view').addEventListener('pointerdown', (ev) => {
     render();
     return;
   }
-  if (td.dataset.e) { drag = { entry: Number(td.dataset.e) }; return; }
+  // A holiday doesn't block adding time off on that day; other entries open.
+  if (td.dataset.e && !td.dataset.e.startsWith('h:')) { drag = { entry: td.dataset.e }; return; }
   if (!canEditPerson(td.dataset.p)) return;
   drag = { person: td.dataset.p, from: td.dataset.d, to: td.dataset.d };
   td.classList.add('sel');
@@ -845,21 +903,30 @@ $('#view').addEventListener('pointerover', (ev) => {
 window.addEventListener('pointerup', () => {
   if (!drag) return;
   const d = drag; drag = null;
-  if (d.entry) return openTimeOff(state.timeOff.find((e) => e.id === d.entry));
+  if (d.entry) return openTimeOff(entryById(d.entry));
   const [a, b] = d.from <= d.to ? [d.from, d.to] : [d.to, d.from];
   openTimeOff(null, { person_id: Number(d.person), start: a, end: b });
 });
 $('#offDlg').addEventListener('close', () => $$('td.sel').forEach((c) => c.classList.remove('sel')));
 $('#view').addEventListener('click', (ev) => {
   const bar = ev.target.closest('.bar[data-e]');
-  if (bar) openTimeOff(state.timeOff.find((e) => e.id === Number(bar.dataset.e)));
+  if (bar) openTimeOff(entryById(bar.dataset.e));
 });
 
 // ---------- tooltip ----------
 
 function describeEntry(e) {
   const p = personById(e.person_id);
-  const t = typeById(e.type_id);
+  const t = typeOf(e);
+  if (e.holiday) {
+    let yours = '';
+    if (p && offsetMs(p.timezone, Date.now()) !== offsetMs(state.viewerTz, Date.now())) {
+      const [s, en] = offSpan(e, e.start_date, p.timezone);
+      yours = `<div class="tl">Your time: ${esc(fmtDayTime(s, state.viewerTz))} → ${esc(fmtDayTime(en, state.viewerTz))}</div>`;
+    }
+    return `<b>${esc(e.name)}</b> · public holiday<div>${esc(p?.name || '')}</div>
+      <div>${esc(niceDate(e.start_date))} <span class="tl">(${esc(p?.holiday_key || '')})</span></div>${yours}`;
+  }
   const range = e.start_date === e.end_date ? niceDate(e.start_date) : `${niceDate(e.start_date)} – ${niceDate(e.end_date)}`;
   const part = { full: 'Full day', am: 'Morning', pm: 'Afternoon', hours: `${e.start_time}–${e.end_time}` }[e.part];
   let yours = '';
@@ -903,7 +970,7 @@ document.addEventListener('pointermove', (ev) => {
       const p = personById(Number(el.dataset.hm));
       if (p) html = describeHoursCell(p, el.dataset.d);
     } else if (el.dataset.e) {
-      const e = state.timeOff.find((x) => x.id === Number(el.dataset.e));
+      const e = entryById(el.dataset.e);
       if (e) html = describeEntry(e);
     } else {
       const p = personById(Number(el.dataset.person));

@@ -21,6 +21,13 @@ one Docker container with a SQLite file for storage.
   browser's and can be changed in the top bar. Hovering a person shows
   their local time and their hours in yours; hovering time off shows when
   it starts and ends for you. DST is handled by the browser's own zone data.
+- **Public holidays**: built in for 200+ countries and their states/regions
+  (US states, German Länder, UK nations...), from offline data; nothing is
+  fetched from the internet. Each person gets their country's public
+  holidays automatically from their time zone (America/Chicago → US,
+  Europe/Paris → France), shown like a day off. Pick a state or region, a
+  different country, or none in their profile. Only official public
+  holidays count, not observances or optional days like Christmas Eve.
 - **Manage**: people (zone, department, groups, weekly hours, including
   night shifts that run past midnight), departments, groups and time-off
   types with their colors.
@@ -331,7 +338,9 @@ table above (401 when signed out, 403 when not allowed).
 | --- | --- |
 | `GET /api/data` | departments, groups, time-off types, people (emails only when signed in) |
 | `GET /api/time-off?from=YYYY-MM-DD&to=YYYY-MM-DD` | entries overlapping the range |
-| `PUT /api/people/:id` | `name, email, department_id, timezone, schedule, group_ids, active` (members: own row, email and active ignored) |
+| `GET /api/holidays?from=YYYY-MM-DD&to=YYYY-MM-DD` | public holidays per holiday key in use: `{ "US-CA": [{date, name}], ... }` |
+| `GET /api/holiday-options[?country=US]` | countries, or one country's states/regions |
+| `PUT /api/people/:id` | `name, email, department_id, timezone, schedule, group_ids, active, holidays` (members: own row, email and active ignored). `holidays`: `null` = from time zone, `""` = none, or `"FR"` / `"US-CA"` |
 | `POST/DELETE /api/people[/:id]` | admin |
 | `POST/PUT/DELETE /api/time-off[/:id]` | `person_id, type_id, start_date, end_date, part (full/am/pm/hours), start_time, end_time, status (approved/pending), note` |
 | `POST/PUT/DELETE /api/departments`, `/api/groups`, `/api/leave-types` | admin; `name` (and `color` for types) |
@@ -348,3 +357,6 @@ runs past midnight.
 ## License
 
 AGPL-3.0-only. Copyright (C) 2026 Spencer LeBlanc.
+
+Holiday data comes from [date-holidays](https://github.com/commenthol/date-holidays)
+(ISC; its holiday data is CC-BY-SA-4.0).

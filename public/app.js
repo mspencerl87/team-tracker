@@ -133,6 +133,19 @@ const viewerToday = () => dateIn(state.viewerTz, Date.now());
 state.anchor = viewerToday();
 state.hoursDate = viewerToday();
 
+// Link parameters open a given view, e.g. #view=hours&span=month&date=2026-11-01&tz=Europe/Paris,
+// for sharing a link (or taking screenshots). They override what this browser remembered.
+(() => {
+  const hp = new URLSearchParams(location.hash.slice(1));
+  const view = hp.get('view'), span = hp.get('span'), date = hp.get('date'), tz = hp.get('tz');
+  if (['calendar', 'hours', 'manage'].includes(view)) state.view = view;
+  if (span === 'month') state.calSpan = state.hrsSpan = 'month';
+  else if (span) { state.calSpan = 'weeks'; state.hrsSpan = 'day'; }
+  if (tz && validTz(tz)) state.viewerTz = tz;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(date || '')) state.anchor = state.hoursDate = date;
+  else if (tz) state.anchor = state.hoursDate = viewerToday();
+})();
+
 // Mirrors the server's rule; the server still checks every change.
 const canEditPerson = (pid) => state.isAdmin || (state.me?.person_id != null && state.me.person_id === Number(pid));
 const canEditAnyone = () => state.isAdmin || state.me?.person_id != null;

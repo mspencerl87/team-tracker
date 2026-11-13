@@ -120,6 +120,8 @@ a.btn.sso { text-decoration: none; }
 
 /* ---------- calendar grid ---------- */
 #view { padding: 0 20px 10px; }
+/* Manage hides the toolbar, which otherwise gives the view its top gap. */
+#toolbar[hidden] + #view { padding-top: 16px; }
 .grid-wrap { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; overflow-x: auto; }
 table.grid { border-collapse: collapse; table-layout: fixed; user-select: none; }
 .grid th, .grid td { padding: 0; border: 1px solid var(--line); }

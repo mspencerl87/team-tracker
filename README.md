@@ -30,14 +30,173 @@ one Docker container with a SQLite file for storage.
   Microsoft Entra, Authentik, Keycloak...) limited to your email domains,
   and then edit their own profile and time off. Admins edit everything.
 
-## Run it
+## Screenshots
+
+**Calendar**: who's off when, grouped by department. Shaded days are each
+person's own days off; the times on the left are their local time now.
+
+![Calendar, weeks view](docs/screenshots/calendar.png)
+
+**Hours, day**: one day in your time zone, with everyone's working hours
+converted from theirs, the current time in red and coverage at the bottom.
+
+![Hours, day view](docs/screenshots/hours-day.png)
+
+**Hours, month**: every person's working hours in your time for the whole
+month, with daily coverage.
+
+![Hours, month view](docs/screenshots/hours-month.png)
+
+<details>
+<summary>More: calendar month, dark mode, Manage</summary>
+
+![Calendar, month view](docs/screenshots/calendar-month.png)
+
+![Calendar in dark mode](docs/screenshots/calendar-dark.png)
+
+![Manage page](docs/screenshots/manage.png)
+
+</details>
+
+## Setup with Docker Compose
+
+You need a Linux host with Docker Engine and the Compose plugin
+(`docker compose version` should print 2.24 or newer). To let people sign
+in, you also need a hostname for it (e.g. `team.example.com`) served over
+HTTPS by a reverse proxy; for a quick look on your own network you can skip
+that and use the admin password.
+
+### 1. Get the code
+
+```bash
+git clone https://github.com/mspencerl87/team-tracker.git
+cd team-tracker
+```
+
+### 2. Configure
+
+```bash
+cp .env.example .env
+openssl rand -hex 32
+```
+
+Edit `.env`: paste that random string as `SESSION_SECRET`, set an
+`ADMIN_PASSWORD`, and set `PUBLIC_URL` to the address people will open.
+Then pick a sign-in method (see [Setting up sign-in](#setting-up-sign-in)):
+
+- **Matrix homeserver with Matrix Authentication Service**: set
+  `MATRIX_SERVER_NAME` and `ADMIN_USER_IDS`. Nothing to register.
+- **Google, Microsoft or another OIDC provider**: set the `OIDC_*` lines,
+  `ALLOWED_EMAIL_DOMAINS` and `ADMIN_EMAILS`.
+- **Neither, for now**: leave both blocks commented out. Everyone can view;
+  only someone with the admin password can edit.
+
+Leave any block you don't use commented out: a half-filled one turns sign-in
+on with values that don't work.
+
+### 3. Start it
 
 ```bash
 docker compose up -d --build
+docker compose logs -f team-tracker
 ```
 
-Then open http://localhost:8080. On an empty install you can load a sample
-team to look around and delete it later.
+The log shows which sign-in methods are on, e.g.
+`Team Tracker listening on :8080 (OIDC sign-in + admin password)`. Press
+Ctrl+C to stop following it (the app keeps running).
+
+### 4. Put it behind HTTPS
+
+The container listens on port 8080. If the reverse proxy runs on the same
+host, change the port line in `docker-compose.yml` to
+`"127.0.0.1:8080:8080"` so it isn't reachable around the proxy.
+
+Caddy (gets the certificate itself):
+
+```
+team.example.com {
+    reverse_proxy localhost:8080
+}
+```
+
+nginx:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name team.example.com;
+    # ssl_certificate ... ; ssl_certificate_key ... ;
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+### 5. First sign-in
+
+Open your `PUBLIC_URL` and click **Sign in**. Accounts listed in
+`ADMIN_USER_IDS` / `ADMIN_EMAILS` become admins; everyone else is a member
+and gets a person row they can adjust under **My profile**. If you're not an
+admin yet, sign in with the admin password instead and promote yourself
+under **Manage → Accounts**.
+
+Then, under **Manage**, add your departments and groups and check the
+time-off types. On an empty install an admin can load a sample team to look
+around first; delete those people afterwards.
+
+### Updating
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+The database upgrades itself on start; data, accounts and `.env` are kept.
+
+### Without cloning
+
+Compose can build straight from GitHub. Put this in a `docker-compose.yml`
+with your `.env` next to it:
+
+```yaml
+services:
+  team-tracker:
+    build: https://github.com/mspencerl87/team-tracker.git#main
+    image: team-tracker:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file: .env
+    volumes:
+      - team-tracker-data:/data
+volumes:
+  team-tracker-data:
+```
+
+Update with `docker compose build --pull && docker compose up -d`.
+
+### Troubleshooting
+
+- **Sign-in page says the provider couldn't be reached**: check
+  `docker compose logs team-tracker`; the line after `OIDC login:` says why.
+- **Signed in but not an admin**: the account's identity (shown under Manage
+  → Accounts when you sign in with the admin password) must appear exactly in
+  `ADMIN_USER_IDS` / `ADMIN_EMAILS`. It's applied when you sign in, so sign
+  out and in again after changing `.env` and running `docker compose up -d`.
+- **List everyone who has signed in**:
+  ```bash
+  docker compose exec team-tracker node -e "console.table(require('better-sqlite3')('/data/team-tracker.db').prepare('SELECT email, role, created_at, last_login FROM users').all())"
+  ```
+- **Matrix sign-in broke after a MAS reset**: delete the saved client
+  registration and restart: `docker compose exec team-tracker rm /data/oauth_client.json && docker compose restart`.
+
+### Links to a view
+
+A link can open a given view in a given zone, e.g.
+`https://team.example.com/#view=hours&span=month&date=2026-11-01&tz=Europe/Paris`.
+`view` is `calendar`, `hours` or `manage`; `span` is `month` or `weeks`/`day`.
 
 ### Settings
 
@@ -138,10 +297,20 @@ serves `/.well-known/openid-configuration`).
 
 ### Backups
 
-All data is in one SQLite file in the volume. Copy it while running with:
+All data is in one SQLite file in the `team-tracker-data` volume. Make a
+consistent copy while it's running, then copy that out of the container:
 
 ```bash
-docker compose exec team-tracker node -e "require('better-sqlite3')('/data/team-tracker.db').backup('/data/backup.db')"
+docker compose exec team-tracker node -e "require('better-sqlite3')('/data/team-tracker.db').backup('/data/backup.db').then(() => console.log('done'))"
+docker compose cp team-tracker:/data/backup.db ./team-tracker-backup.db
+```
+
+To restore, stop it, copy the file back as `team-tracker.db`, and start it:
+
+```bash
+docker compose stop
+docker compose cp ./team-tracker-backup.db team-tracker:/data/team-tracker.db
+docker compose start
 ```
 
 ## Run without Docker

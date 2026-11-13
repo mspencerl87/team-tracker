@@ -2,84 +2,21 @@
 // Copyright (C) 2026 Spencer LeBlanc
 
 const path = require('path');
-const crypto = require('crypto');
 const express = require('express');
 const db = require('./db');
+const { cfg, auth, canEditPerson, requireAdmin, requireSignedIn, routes: authRoutes } = require('./auth');
 
 const PORT = Number(process.env.PORT) || 8080;
-// With ADMIN_PASSWORD set, viewing stays open but every change needs the admin
-// login. Without it anyone who can reach the page can edit (fine on a trusted
-// LAN or behind an auth proxy; not on the open internet).
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
-// Signs the login cookie. A random one per start means a restart logs admins
-// out, which is harmless; set it to keep logins across restarts.
-const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
-const SESSION_DAYS = 30;
-const COOKIE = 'tt_session';
 
 const app = express();
 app.disable('x-powered-by');
 app.use(express.json({ limit: '256kb' }));
-
-// ---------- auth ----------
-
-function sign(value) {
-  return crypto.createHmac('sha256', SESSION_SECRET).update(value).digest('base64url');
-}
-
-function readCookie(req, name) {
-  const header = req.headers.cookie || '';
-  for (const part of header.split(';')) {
-    const i = part.indexOf('=');
-    if (i > 0 && part.slice(0, i).trim() === name) return decodeURIComponent(part.slice(i + 1).trim());
-  }
-  return null;
-}
-
-function isAdmin(req) {
-  if (!ADMIN_PASSWORD) return true;
-  const raw = readCookie(req, COOKIE);
-  if (!raw) return false;
-  const [expires, sig] = raw.split('.');
-  if (!expires || !sig || Number(expires) < Date.now()) return false;
-  const want = sign(`admin:${expires}`);
-  return want.length === sig.length && crypto.timingSafeEqual(Buffer.from(want), Buffer.from(sig));
-}
-
-function requireEdit(req, res, next) {
-  if (isAdmin(req)) return next();
-  res.status(401).json({ error: 'Log in as admin to make changes.' });
-}
-
-function secureCookie(req) {
-  return req.secure || req.headers['x-forwarded-proto'] === 'https';
-}
-
-app.get('/api/session', (req, res) => {
-  res.json({ canEdit: isAdmin(req), loginRequired: Boolean(ADMIN_PASSWORD) });
-});
-
-app.post('/api/login', (req, res) => {
-  const given = String(req.body?.password || '');
-  const a = crypto.createHash('sha256').update(given).digest();
-  const b = crypto.createHash('sha256').update(ADMIN_PASSWORD).digest();
-  if (!ADMIN_PASSWORD || !crypto.timingSafeEqual(a, b)) {
-    return res.status(401).json({ error: 'Wrong password.' });
-  }
-  const expires = Date.now() + SESSION_DAYS * 86400e3;
-  const value = `${expires}.${sign(`admin:${expires}`)}`;
-  res.setHeader('Set-Cookie', `${COOKIE}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}${secureCookie(req) ? '; Secure' : ''}`);
-  res.json({ ok: true });
-});
-
-app.post('/api/logout', (req, res) => {
-  res.setHeader('Set-Cookie', `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
-  res.json({ ok: true });
-});
+authRoutes(app);
 
 // ---------- validation ----------
 
 class BadRequest extends Error {}
+class Forbidden extends Error {}
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -149,6 +86,7 @@ function handle(fn) {
       if (!res.headersSent) res.json(out ?? { ok: true });
     } catch (err) {
       if (err instanceof BadRequest) return res.status(400).json({ error: err.message });
+      if (err instanceof Forbidden) return res.status(403).json({ error: err.message });
       if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') return res.status(409).json({ error: 'That name is already used.' });
       if (err.code && err.code.startsWith('SQLITE_CONSTRAINT')) return res.status(400).json({ error: 'That would break a link to other data.' });
       console.error(err);
@@ -161,7 +99,8 @@ function handle(fn) {
 
 const DEFAULT_SCHEDULE = { 0: [], 1: [['09:00', '17:00']], 2: [['09:00', '17:00']], 3: [['09:00', '17:00']], 4: [['09:00', '17:00']], 5: [['09:00', '17:00']], 6: [] };
 
-function loadPeople() {
+// The calendar is public, so email addresses only go to signed-in viewers.
+function loadPeople(showEmail) {
   const groups = db.prepare('SELECT person_id, group_id FROM person_groups').all();
   const byPerson = new Map();
   for (const g of groups) {
@@ -170,29 +109,30 @@ function loadPeople() {
   }
   return db.prepare('SELECT * FROM people ORDER BY name COLLATE NOCASE').all().map((p) => ({
     ...p,
+    email: showEmail ? p.email : null,
     active: Boolean(p.active),
     schedule: JSON.parse(p.schedule),
     group_ids: byPerson.get(p.id) || [],
   }));
 }
 
-app.get('/api/data', handle(() => ({
+app.get('/api/data', handle((req) => ({
   departments: db.prepare('SELECT * FROM departments ORDER BY name COLLATE NOCASE').all(),
   groups: db.prepare('SELECT * FROM groups ORDER BY name COLLATE NOCASE').all(),
   leaveTypes: db.prepare('SELECT * FROM leave_types ORDER BY sort, name').all(),
-  people: loadPeople(),
+  people: loadPeople(auth(req).signedIn || cfg.open),
 })));
 
 // Departments and groups share one shape.
 for (const table of ['departments', 'groups']) {
-  app.post(`/api/${table}`, requireEdit, handle((req) => {
+  app.post(`/api/${table}`, requireAdmin, handle((req) => {
     const info = db.prepare(`INSERT INTO ${table} (name) VALUES (?)`).run(str(req.body.name, 'Name', { max: 80 }));
     return { id: info.lastInsertRowid };
   }));
-  app.put(`/api/${table}/:id`, requireEdit, handle((req) => {
+  app.put(`/api/${table}/:id`, requireAdmin, handle((req) => {
     db.prepare(`UPDATE ${table} SET name = ? WHERE id = ?`).run(str(req.body.name, 'Name', { max: 80 }), id(req.params.id));
   }));
-  app.delete(`/api/${table}/:id`, requireEdit, handle((req) => {
+  app.delete(`/api/${table}/:id`, requireAdmin, handle((req) => {
     db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(id(req.params.id));
   }));
 }
@@ -203,14 +143,14 @@ function leaveTypeFields(body) {
   return [str(body.name, 'Name', { max: 60 }), color, Number.isInteger(body.sort) ? body.sort : 0];
 }
 
-app.post('/api/leave-types', requireEdit, handle((req) => {
+app.post('/api/leave-types', requireAdmin, handle((req) => {
   const info = db.prepare('INSERT INTO leave_types (name, color, sort) VALUES (?, ?, ?)').run(...leaveTypeFields(req.body));
   return { id: info.lastInsertRowid };
 }));
-app.put('/api/leave-types/:id', requireEdit, handle((req) => {
+app.put('/api/leave-types/:id', requireAdmin, handle((req) => {
   db.prepare('UPDATE leave_types SET name = ?, color = ?, sort = ? WHERE id = ?').run(...leaveTypeFields(req.body), id(req.params.id));
 }));
-app.delete('/api/leave-types/:id', requireEdit, handle((req) => {
+app.delete('/api/leave-types/:id', requireAdmin, handle((req) => {
   const used = db.prepare('SELECT COUNT(*) AS n FROM time_off WHERE type_id = ?').get(id(req.params.id)).n;
   if (used) throw new BadRequest(`${used} time-off entries use this type; change or delete them first.`);
   db.prepare('DELETE FROM leave_types WHERE id = ?').run(id(req.params.id));
@@ -235,7 +175,7 @@ function setGroups(personId, groupIds) {
   for (const g of new Set((Array.isArray(groupIds) ? groupIds : []).map(id))) add.run(personId, g);
 }
 
-app.post('/api/people', requireEdit, handle((req) => db.transaction(() => {
+app.post('/api/people', requireAdmin, handle((req) => db.transaction(() => {
   const f = personFields(req.body);
   const info = db.prepare(`INSERT INTO people (name, email, department_id, timezone, schedule, active)
     VALUES (@name, @email, @department_id, @timezone, @schedule, @active)`).run(f);
@@ -243,14 +183,21 @@ app.post('/api/people', requireEdit, handle((req) => db.transaction(() => {
   return { id: info.lastInsertRowid };
 })()));
 
-app.put('/api/people/:id', requireEdit, handle((req) => db.transaction(() => {
-  const f = { ...personFields(req.body), id: id(req.params.id) };
+// Members edit their own row: name, department, groups, zone and hours. Email
+// (it links their sign-in) and active stay as an admin left them.
+app.put('/api/people/:id', requireSignedIn, handle((req) => db.transaction(() => {
+  const pid = id(req.params.id);
+  if (!canEditPerson(req, pid)) throw new Forbidden('You can only edit your own profile.');
+  const current = db.prepare('SELECT * FROM people WHERE id = ?').get(pid);
+  if (!current) throw new BadRequest('No such person.');
+  const f = { ...personFields(req.body), id: pid };
+  if (!auth(req).admin) { f.email = current.email; f.active = current.active; }
   db.prepare(`UPDATE people SET name = @name, email = @email, department_id = @department_id,
     timezone = @timezone, schedule = @schedule, active = @active WHERE id = @id`).run(f);
   setGroups(f.id, req.body.group_ids);
 })()));
 
-app.delete('/api/people/:id', requireEdit, handle((req) => {
+app.delete('/api/people/:id', requireAdmin, handle((req) => {
   db.prepare('DELETE FROM people WHERE id = ?').run(id(req.params.id));
 }));
 
@@ -283,27 +230,61 @@ function timeOffFields(body) {
   return f;
 }
 
-app.post('/api/time-off', requireEdit, handle((req) => {
+function ownedEntry(req) {
+  const row = db.prepare('SELECT * FROM time_off WHERE id = ?').get(id(req.params.id));
+  if (!row) throw new BadRequest('No such entry.');
+  if (!canEditPerson(req, row.person_id)) throw new Forbidden('You can only change your own time off.');
+  return row;
+}
+
+app.post('/api/time-off', requireSignedIn, handle((req) => {
+  const f = timeOffFields(req.body);
+  if (!canEditPerson(req, f.person_id)) throw new Forbidden('You can only add your own time off.');
   const info = db.prepare(`INSERT INTO time_off (person_id, type_id, start_date, end_date, part, start_time, end_time, status, note)
-    VALUES (@person_id, @type_id, @start_date, @end_date, @part, @start_time, @end_time, @status, @note)`).run(timeOffFields(req.body));
+    VALUES (@person_id, @type_id, @start_date, @end_date, @part, @start_time, @end_time, @status, @note)`).run(f);
   return { id: info.lastInsertRowid };
 }));
 
-app.put('/api/time-off/:id', requireEdit, handle((req) => {
+app.put('/api/time-off/:id', requireSignedIn, handle((req) => {
+  const row = ownedEntry(req);
+  const f = timeOffFields(req.body);
+  if (!canEditPerson(req, f.person_id)) throw new Forbidden('You can only move time off between people you can edit.');
   db.prepare(`UPDATE time_off SET person_id = @person_id, type_id = @type_id, start_date = @start_date, end_date = @end_date,
     part = @part, start_time = @start_time, end_time = @end_time, status = @status, note = @note WHERE id = @id`)
-    .run({ ...timeOffFields(req.body), id: id(req.params.id) });
+    .run({ ...f, id: row.id });
 }));
 
-app.delete('/api/time-off/:id', requireEdit, handle((req) => {
-  db.prepare('DELETE FROM time_off WHERE id = ?').run(id(req.params.id));
+app.delete('/api/time-off/:id', requireSignedIn, handle((req) => {
+  db.prepare('DELETE FROM time_off WHERE id = ?').run(ownedEntry(req).id);
+}));
+
+// ---------- users (admin) ----------
+
+app.get('/api/users', requireAdmin, handle(() =>
+  db.prepare('SELECT id, email, name, role, person_id, created_at, last_login FROM users ORDER BY email').all()));
+
+app.put('/api/users/:id', requireAdmin, handle((req) => {
+  const uid = id(req.params.id);
+  const role = req.body.role === 'admin' ? 'admin' : 'member';
+  const me = auth(req).user;
+  if (me && me.id === uid && role !== 'admin') throw new BadRequest("You can't remove your own admin role.");
+  db.prepare('UPDATE users SET role = ?, person_id = ? WHERE id = ?').run(role, idOrNull(req.body.person_id), uid);
+}));
+
+// Removes the account only; the person and their time off stay. Signing in
+// again recreates the account (and relinks by email), so block people at the
+// provider or drop their domain to keep them out.
+app.delete('/api/users/:id', requireAdmin, handle((req) => {
+  const uid = id(req.params.id);
+  if (auth(req).user?.id === uid) throw new BadRequest("You can't delete your own account.");
+  db.prepare('DELETE FROM users WHERE id = ?').run(uid);
 }));
 
 // ---------- sample team ----------
 
 // One click on an empty install fills in a team spread over several zones, so
 // the calendar and hours views have something to show. Refused once anyone exists.
-app.post('/api/demo', requireEdit, handle(() => db.transaction(() => {
+app.post('/api/demo', requireAdmin, handle(() => db.transaction(() => {
   if (db.prepare('SELECT COUNT(*) AS n FROM people').get().n) throw new BadRequest('There are already people; the sample team only loads into an empty tracker.');
   const dep = (name) => db.prepare('INSERT OR IGNORE INTO departments (name) VALUES (?)').run(name) &&
     db.prepare('SELECT id FROM departments WHERE name = ?').get(name).id;
@@ -357,5 +338,7 @@ app.get('/healthz', (req, res) => res.send('ok'));
 app.use(express.static(path.join(__dirname, '..', 'public'), { maxAge: 0 }));
 
 app.listen(PORT, () => {
-  console.log(`Team Tracker listening on :${PORT}${ADMIN_PASSWORD ? ' (admin login required to edit)' : ' (open editing: set ADMIN_PASSWORD to restrict)'}`);
+  const how = cfg.open ? 'open editing: set up OIDC or ADMIN_PASSWORD to restrict'
+    : [cfg.oidc && `OIDC sign-in${cfg.domains.length ? ' for ' + cfg.domains.join(', ') : ''}`, cfg.adminPassword && 'admin password'].filter(Boolean).join(' + ');
+  console.log(`Team Tracker listening on :${PORT} (${how})`);
 });

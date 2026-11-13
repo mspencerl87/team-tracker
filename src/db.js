@@ -72,6 +72,23 @@ const MIGRATIONS = [
     ('Training', '#a78bfa', 5),
     ('Other', '#f59e0b', 6);
   `,
+  // Accounts from OIDC sign-in. (issuer, sub) is the identity; email is what
+  // the domain check and person linking use. A member edits only person_id.
+  `
+  CREATE TABLE users (
+    id INTEGER PRIMARY KEY,
+    issuer TEXT NOT NULL,
+    sub TEXT NOT NULL,
+    email TEXT NOT NULL,
+    name TEXT,
+    role TEXT NOT NULL DEFAULT 'member',
+    person_id INTEGER REFERENCES people(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_login TEXT,
+    UNIQUE (issuer, sub)
+  );
+  CREATE UNIQUE INDEX users_person ON users(person_id) WHERE person_id IS NOT NULL;
+  `,
 ];
 
 function migrate() {

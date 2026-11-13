@@ -21,6 +21,10 @@ one Docker container with a SQLite file for storage.
 - **Manage**: people (zone, department, groups, weekly hours, including
   night shifts that run past midnight), departments, groups and time-off
   types with their colors.
+- **Sign-in**: anyone can view without signing in. People sign in with your
+  company's OIDC provider (Google Workspace, Microsoft Entra, Authentik,
+  Keycloak...), limited to your email domains, and then edit their own
+  profile and time off. Admins edit everything.
 
 ## Run it
 
@@ -33,17 +37,76 @@ team to look around and delete it later.
 
 ### Settings
 
+Put them in a `.env` next to `docker-compose.yml` (start from `.env.example`).
+
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `ADMIN_PASSWORD` | empty | When set, anyone can view but changes need the admin login. When empty, **anyone who can open the page can edit**: fine on a trusted network or behind an auth proxy, not on the open internet. |
-| `SESSION_SECRET` | random per start | Signs the admin login cookie. Set it to keep logins across restarts. |
+| `PUBLIC_URL` | | The address people open, e.g. `https://team.example.com`. Required with OIDC. |
+| `OIDC_ISSUER` | | Your provider's issuer URL (see below). Setting it and `OIDC_CLIENT_ID` turns on sign-in. |
+| `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` | | From the app registration at your provider. |
+| `OIDC_LABEL` | `Sign in with SSO` | Text on the sign-in button. |
+| `ALLOWED_EMAIL_DOMAINS` | | Comma-separated, e.g. `example.com,example.co.uk`. Only these can sign in. **Leave it set**: without it, anyone the provider accepts gets in. |
+| `ADMIN_EMAILS` | | Comma-separated; these accounts are made admins when they sign in. Others can be promoted under Manage → Accounts. |
+| `ADMIN_PASSWORD` | | Optional break-glass admin login, for first setup or when the provider is down. |
+| `SESSION_SECRET` | random per start | Signs session cookies. Set it, or everyone is signed out on each restart. |
+| `OIDC_REQUIRE_VERIFIED_EMAIL` | `true` | Set `false` only if your provider doesn't mark emails verified but owns them anyway (some Authentik/Keycloak setups). |
+| `OIDC_SCOPES` | `openid email profile` | |
 | `PORT` | `8080` | Port inside the container. |
 | `DATA_DIR` | `/data` | Where `team-tracker.db` lives (a volume in the compose file). |
 
-Put them in a `.env` next to `docker-compose.yml` (see `.env.example`).
-Serve it behind HTTPS (Caddy, Traefik, nginx) if it's reachable from
-outside; the login cookie is marked Secure when the proxy sends
-`X-Forwarded-Proto: https`.
+With neither OIDC nor `ADMIN_PASSWORD` set, **anyone who can open the page
+can edit**: fine for a quick look on a trusted network, not otherwise.
+
+Serve it behind HTTPS (Caddy, Traefik, nginx) when it's reachable from
+outside. Cookies are marked Secure when `PUBLIC_URL` is https.
+
+### Who can do what
+
+| | Visitor | Member (signed in) | Admin |
+| --- | --- | --- | --- |
+| View calendar and hours | ✓ | ✓ | ✓ |
+| See email addresses | | ✓ | ✓ |
+| Edit own name, zone, hours, department, groups | | ✓ | ✓ |
+| Add/edit/delete own time off | | ✓ | ✓ |
+| Edit other people and their time off | | | ✓ |
+| Departments, groups, time-off types, accounts | | | ✓ |
+
+The first time someone signs in, they're linked to the person with the same
+email (an admin can pre-fill emails), or a new person is created in their
+browser's time zone with Mon–Fri 09:00–17:00 hours for them to adjust under
+**My profile**. Admins can relink accounts under Manage → Accounts.
+
+### Setting up sign-in
+
+Register a web application with your provider, with redirect URI
+`PUBLIC_URL/auth/callback` (e.g. `https://team.example.com/auth/callback`).
+
+**Google Workspace**: Google Cloud console → APIs & Services → OAuth consent
+screen, user type **Internal** (only your Workspace can sign in), then
+Credentials → Create OAuth client ID → Web application.
+
+```
+OIDC_ISSUER=https://accounts.google.com
+OIDC_LABEL=Sign in with Google
+ALLOWED_EMAIL_DOMAINS=yourcompany.com
+```
+
+**Microsoft Entra ID (Microsoft 365)**: Entra admin center → App
+registrations → New registration, "Accounts in this organizational directory
+only", platform Web with the redirect URI; then Certificates & secrets → New
+client secret. Use your tenant ID in the issuer (not `common`): the app
+then trusts the sign-in name (UPN) Entra gives, which only your tenant's
+admins control.
+
+```
+OIDC_ISSUER=https://login.microsoftonline.com/<tenant-id>/v2.0
+OIDC_LABEL=Sign in with Microsoft
+ALLOWED_EMAIL_DOMAINS=yourcompany.com
+```
+
+**Authentik / Keycloak / others**: create an OIDC provider/client
+(confidential, authorization code), and use its issuer URL (the one that
+serves `/.well-known/openid-configuration`).
 
 ### Backups
 
@@ -64,16 +127,21 @@ npm start
 
 ## API
 
-JSON over HTTP; write routes need the admin cookie when `ADMIN_PASSWORD` is set.
+JSON over HTTP with the session cookie. Reads are public; writes follow the
+table above (401 when signed out, 403 when not allowed).
 
 | Route | |
 | --- | --- |
-| `GET /api/data` | departments, groups, time-off types, people |
+| `GET /api/data` | departments, groups, time-off types, people (emails only when signed in) |
 | `GET /api/time-off?from=YYYY-MM-DD&to=YYYY-MM-DD` | entries overlapping the range |
-| `POST/PUT/DELETE /api/people[/:id]` | `name, email, department_id, timezone, schedule, group_ids, active` |
+| `PUT /api/people/:id` | `name, email, department_id, timezone, schedule, group_ids, active` (members: own row, email and active ignored) |
+| `POST/DELETE /api/people[/:id]` | admin |
 | `POST/PUT/DELETE /api/time-off[/:id]` | `person_id, type_id, start_date, end_date, part (full/am/pm/hours), start_time, end_time, status (approved/pending), note` |
-| `POST/PUT/DELETE /api/departments`, `/api/groups`, `/api/leave-types` | `name` (and `color` for types) |
-| `GET /api/session`, `POST /api/login`, `POST /api/logout` | admin login |
+| `POST/PUT/DELETE /api/departments`, `/api/groups`, `/api/leave-types` | admin; `name` (and `color` for types) |
+| `GET /api/users`, `PUT/DELETE /api/users/:id` | admin; `role (member/admin), person_id` |
+| `GET /api/session` | who's signed in and which sign-in methods exist |
+| `GET /auth/login?tz=Zone`, `GET /auth/callback` | OIDC sign-in |
+| `POST /api/login`, `POST /api/logout` | admin password, sign out |
 | `GET /healthz` | liveness |
 
 `schedule` is `{ "0": [], "1": [["09:00","17:00"]], ... }` keyed by weekday

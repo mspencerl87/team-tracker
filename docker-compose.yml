@@ -6,11 +6,11 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
-    environment:
-      # Leave empty to let anyone who can open the page edit (trusted LAN only).
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
-      # Set to a long random string to keep admin logins across restarts.
-      SESSION_SECRET: ${SESSION_SECRET:-}
+    # Settings come from .env next to this file (see .env.example and the
+    # README). With none set, anyone who can open the page can edit.
+    env_file:
+      - path: .env
+        required: false
     volumes:
       - team-tracker-data:/data
 

@@ -22,6 +22,8 @@
         <input id="viewerTz" list="tzList" spellcheck="false" autocomplete="off">
       </label>
       <span class="clock" id="clock"></span>
+      <button class="btn ghost" id="profileBtn" hidden>My profile</button>
+      <span class="who" id="who" hidden></span>
       <button class="btn ghost" id="authBtn" hidden></button>
     </div>
   </header>
@@ -139,8 +141,10 @@
   <!-- Login -->
   <dialog id="loginDlg">
     <form method="dialog" class="dlg" id="loginForm">
-      <h2>Admin login</h2>
-      <label>Password <input type="password" name="password" required autocomplete="current-password"></label>
+      <h2>Sign in</h2>
+      <a class="btn primary sso" id="ssoLink" href="/auth/login" hidden>Sign in with SSO</a>
+      <p class="hint" id="pwHint" hidden>Admin password (for setup and emergencies):</p>
+      <label id="pwLabel">Password <input type="password" name="password" autocomplete="current-password"></label>
       <p class="error" id="loginError"></p>
       <div class="dlg-actions">
         <span class="spacer"></span>

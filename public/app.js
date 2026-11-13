@@ -106,8 +106,12 @@ const state = {
   data: { departments: [], groups: [], leaveTypes: [], people: [] },
   timeOff: [],
   offIdx: new Map(),
-  canEdit: false,
-  loginRequired: false,
+  me: null,        // signed-in account, or null
+  isAdmin: false,  // open mode, password admin or admin account
+  signedIn: false,
+  oidc: null,      // SSO button label when OIDC is set up
+  password: false, // admin password login available
+  users: [],
   view: store('view') || 'calendar',
   viewerTz: validTz(store('tz') || '') ? store('tz') : browserTz,
   mode: store('mode') === 'groups' ? 'groups' : 'departments',
@@ -121,13 +125,15 @@ const viewerToday = () => dateIn(state.viewerTz, Date.now());
 state.anchor = viewerToday();
 state.hoursDate = viewerToday();
 
+// Mirrors the server's rule; the server still checks every change.
+const canEditPerson = (pid) => state.isAdmin || (state.me?.person_id != null && state.me.person_id === Number(pid));
+const canEditAnyone = () => state.isAdmin || state.me?.person_id != null;
 const typeById = (id) => state.data.leaveTypes.find((t) => t.id === id);
 const personById = (id) => state.data.people.find((p) => p.id === id);
 
 async function loadData() {
   const [session, data] = await Promise.all([api('GET', '/api/session'), api('GET', '/api/data')]);
-  state.canEdit = session.canEdit;
-  state.loginRequired = session.loginRequired;
+  Object.assign(state, { me: session.me, isAdmin: session.isAdmin, signedIn: session.signedIn, oidc: session.oidc, password: session.password });
   state.data = data;
   // Drop filter picks that no longer exist.
   const valid = new Set([...data.departments.map((d) => 'd' + d.id), ...data.groups.map((g) => 'g' + g.id), 'd0']);
@@ -312,7 +318,7 @@ async function renderCalendar() {
         const off = !(p.schedule[weekday(d)] || []).length;
         const ents = entriesOn(p.id, d);
         const base = off ? 'var(--offday)' : 'var(--cell)';
-        const cls = ['day', off && 'off', d === today && 'today', ents.length && 'has'].filter(Boolean).join(' ');
+        const cls = ['day', canEditPerson(p.id) && 'edit', off && 'off', d === today && 'today', ents.length && 'has'].filter(Boolean).join(' ');
         body += `<td class="${cls}" data-p="${p.id}" data-d="${d}"${ents.length ? ` data-e="${ents[0].id}"` : ''} style="${cellStyle(ents, base)}"></td>`;
       }
       body += '</tr>';
@@ -333,8 +339,9 @@ async function renderCalendar() {
 function renderEmpty() {
   $('#view').innerHTML = `<div class="empty-state">
     <p><b>No one here yet.</b></p>
-    <p>Add your team under <b>Manage</b>${state.canEdit ? ', or load a sample team to look around (you can delete it later).' : '.'}</p>
-    ${state.canEdit ? '<button class="btn primary" id="demoBtn">Load a sample team</button>' : ''}
+    <p>${state.isAdmin ? 'Add your team under <b>Manage</b>, or load a sample team to look around (you can delete it later).'
+      : state.oidc ? 'Sign in and you\'ll be added automatically.' : 'An admin can add people under <b>Manage</b>.'}</p>
+    ${state.isAdmin ? '<button class="btn primary" id="demoBtn">Load a sample team</button>' : ''}
   </div>`;
   $('#demoBtn')?.addEventListener('click', async () => {
     try { await api('POST', '/api/demo'); await loadData(); render(); } catch (err) { alert(err.message); }
@@ -450,23 +457,47 @@ function scheduleSummary(p) {
   return same ? `${esc(names)} · ${span}` : `${esc(names)} · varies`;
 }
 
-function renderManage() {
+function usersCard() {
+  if (!state.isAdmin || !state.oidc) return '';
+  const people = state.data.people;
+  const linked = new Set(state.users.map((u) => u.person_id).filter(Boolean));
+  const row = (u) => {
+    const opts = ['<option value="">Not linked</option>', ...people
+      .filter((p) => p.id === u.person_id || !linked.has(p.id))
+      .map((p) => `<option value="${p.id}" ${p.id === u.person_id ? 'selected' : ''}>${esc(p.name)}</option>`)].join('');
+    const self = state.me?.id === u.id;
+    return `<tr><td title="${esc(u.email)}">${esc(u.email)}${self ? ' <span class="muted">(you)</span>' : ''}<div class="muted" style="font-size:11px">last in ${esc((u.last_login || '').slice(0, 10) || 'never')}</div></td>
+      <td><select data-user-person="${u.id}">${opts}</select></td>
+      <td><select data-user-role="${u.id}" ${self ? 'disabled' : ''}><option value="member">Member</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option></select></td>
+      <td class="actions">${self ? '' : `<button class="link danger" data-del-user="${u.id}">Remove</button>`}</td></tr>`;
+  };
+  return `<div class="card"><h3>Accounts <span class="muted">${state.users.length}</span></h3>
+    <p class="hint">Created on first sign-in and linked to the person with the same email (or a new one). Members can edit only their linked person.</p>
+    <table class="list"><thead><tr><th>Email</th><th>Person</th><th>Role</th><th></th></tr></thead>
+    <tbody>${state.users.map(row).join('') || '<tr><td class="muted" colspan="4">Nobody has signed in yet</td></tr>'}</tbody></table></div>`;
+}
+
+async function renderManage() {
+  if (state.isAdmin && state.oidc) state.users = await api('GET', '/api/users').catch(() => []);
   const { people, departments, groups, leaveTypes } = state.data;
   const dep = (id) => departments.find((d) => d.id === id)?.name || '';
   const grp = (ids) => ids.map((id) => groups.find((g) => g.id === id)?.name).filter(Boolean).join(', ');
-  const ro = !state.canEdit;
+  const ro = !state.isAdmin;
+  const notice = state.isAdmin ? ''
+    : state.me ? 'You can edit your own profile and time off. Departments, groups and other people are managed by admins.'
+    : `Viewing only. ${state.oidc || state.password ? 'Sign in (top right) to edit your own profile and time off.' : ''}`;
   const simpleList = (kind, list, label) => `<div class="card"><h3>${label}</h3>
     <table class="list"><tbody>${list.map((x) => `<tr><td>${esc(x.name)}</td><td class="actions">${ro ? '' : `<button class="link" data-rename="${kind}" data-id="${x.id}">Rename</button><button class="link danger" data-del="${kind}" data-id="${x.id}">Delete</button>`}</td></tr>`).join('') || '<tr><td class="muted">None yet</td></tr>'}</tbody></table>
     ${ro ? '' : `<form class="inline-add" data-add="${kind}"><input type="text" name="name" placeholder="New ${label.toLowerCase().replace(/s$/, '')}" required maxlength="80"><button class="btn">Add</button></form>`}</div>`;
 
-  $('#view').innerHTML = `${ro ? `<div class="notice">You're viewing read-only. ${state.loginRequired ? 'Log in as admin (top right) to make changes.' : ''}</div>` : ''}
+  $('#view').innerHTML = `${notice ? `<div class="notice">${esc(notice)}</div>` : ''}
   <div class="manage">
-    <div class="card"><h3>People <span class="muted">${people.length}</span>${ro ? '' : '<button class="btn primary" id="addPerson">Add person</button>'}</h3>
+    <div><div class="card"><h3>People <span class="muted">${people.length}</span>${ro ? '' : '<button class="btn primary" id="addPerson">Add person</button>'}</h3>
       <table class="list"><thead><tr><th>Name</th><th>Department</th><th>Groups</th><th>Time zone</th><th>Work hours (their time)</th><th></th></tr></thead><tbody>
       ${people.map((p) => `<tr class="${p.active ? '' : 'inactive'}"><td>${esc(p.name)}${p.active ? '' : ' <span class="muted">(inactive)</span>'}</td><td>${esc(dep(p.department_id))}</td><td>${esc(grp(p.group_ids))}</td>
         <td>${esc(p.timezone)} <span class="muted">${diffLabel(p.timezone)}</span></td><td>${scheduleSummary(p)}</td>
-        <td class="actions">${ro ? '' : `<button class="link" data-edit-person="${p.id}">Edit</button>`}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">No one yet</td></tr>'}
-      </tbody></table></div>
+        <td class="actions">${canEditPerson(p.id) ? `<button class="link" data-edit-person="${p.id}">Edit</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">No one yet</td></tr>'}
+      </tbody></table></div>${usersCard()}</div>
     <div>
       ${simpleList('departments', departments, 'Departments')}
       ${simpleList('groups', groups, 'Groups')}
@@ -494,6 +525,13 @@ $('#view').addEventListener('submit', (ev) => {
 });
 
 $('#view').addEventListener('change', (ev) => {
+  const { userRole, userPerson } = ev.target.dataset;
+  if (userRole || userPerson) {
+    const u = state.users.find((x) => x.id === Number(userRole || userPerson));
+    const body = { role: u.role, person_id: u.person_id };
+    if (userRole) body.role = ev.target.value; else body.person_id = ev.target.value || null;
+    return manageAction(() => api('PUT', `/api/users/${u.id}`, body));
+  }
   const id = ev.target.dataset.color;
   if (!id) return;
   const t = typeById(Number(id));
@@ -510,6 +548,12 @@ $('#view').addEventListener('click', (ev) => {
     const item = list.find((x) => x.id === Number(t.dataset.id));
     const name = prompt('New name', item.name);
     if (name && name.trim() !== item.name) manageAction(() => api('PUT', `/api/${kind}/${item.id}`, { ...item, name }));
+    return;
+  }
+  if (t.dataset.delUser) {
+    if (confirm('Remove this account? Their person and time off stay. If they can still sign in, the account comes back.')) {
+      manageAction(() => api('DELETE', `/api/users/${t.dataset.delUser}`));
+    }
     return;
   }
   if (t.dataset.del) {
@@ -542,7 +586,9 @@ function openPerson(p) {
     return `<label class="inline"><input type="checkbox" data-day="${d}" ${on ? 'checked' : ''}> ${WD[d]}</label>
       <input type="time" data-start="${d}" value="${s}" ${on ? '' : 'disabled'}><input type="time" data-end="${d}" value="${e}" ${on ? '' : 'disabled'}>`;
   }).join('');
-  $('#personDelete').hidden = !p;
+  // Email links a sign-in to this person, so only admins change it (or active).
+  f.email.disabled = f.active.disabled = !state.isAdmin;
+  $('#personDelete').hidden = !p || !state.isAdmin;
   $('#personDlg').showModal();
 }
 
@@ -593,22 +639,25 @@ $('#personDelete').addEventListener('click', async () => {
 let editingOff = null;
 
 function openTimeOff(entry, defaults = {}) {
-  if (!state.canEdit && !entry) return;
+  if (!entry && !canEditPerson(defaults.person_id)) return;
   editingOff = entry;
   const f = $('#offForm');
   const src = entry || { person_id: defaults.person_id, type_id: state.data.leaveTypes[0]?.id, start_date: defaults.start, end_date: defaults.end, part: 'full', status: 'approved' };
-  $('#offTitle').textContent = entry ? 'Edit time off' : 'Add time off';
+  const editable = canEditPerson(src.person_id);
+  $('#offTitle').textContent = !editable ? 'Time off' : entry ? 'Edit time off' : 'Add time off';
   $('#offError').textContent = '';
-  f.person_id.innerHTML = state.data.people.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+  // Members only see themselves in the list; a read-only view shows the owner.
+  const choices = editable ? state.data.people.filter((p) => canEditPerson(p.id)) : state.data.people.filter((p) => p.id === src.person_id);
+  f.person_id.innerHTML = choices.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
   f.type_id.innerHTML = state.data.leaveTypes.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join('');
   f.person_id.value = src.person_id; f.type_id.value = src.type_id;
   f.start_date.value = src.start_date; f.end_date.value = src.end_date;
   f.part.value = src.part; f.status.value = src.status;
   f.start_time.value = src.start_time || '09:00'; f.end_time.value = src.end_time || '12:00';
   f.note.value = src.note || '';
-  $('#offDelete').hidden = !entry || !state.canEdit;
-  for (const el of f.elements) if (el.dataset.close === undefined && el.type !== 'button') el.disabled = !state.canEdit;
-  $('#offForm button[type=submit]').hidden = !state.canEdit;
+  $('#offDelete').hidden = !entry || !editable;
+  for (const el of f.elements) if (el.dataset.close === undefined && el.type !== 'button') el.disabled = !editable;
+  $('#offForm button[type=submit]').hidden = !editable;
   updateOffHint();
   $('#offDlg').showModal();
 }
@@ -651,7 +700,7 @@ $('#view').addEventListener('pointerdown', (ev) => {
   const td = ev.target.closest('td.day');
   if (!td || ev.button !== 0) return;
   if (td.dataset.e) { drag = { entry: Number(td.dataset.e) }; return; }
-  if (!state.canEdit) return;
+  if (!canEditPerson(td.dataset.p)) return;
   drag = { person: td.dataset.p, from: td.dataset.d, to: td.dataset.d };
   td.classList.add('sel');
 });
@@ -744,12 +793,15 @@ document.addEventListener('pointermove', (ev) => {
 function render() {
   for (const b of $$('#tabs button')) b.classList.toggle('active', b.dataset.view === state.view);
   for (const b of $$('#modeSeg button')) b.classList.toggle('active', b.dataset.mode === state.mode);
-  document.body.classList.toggle('can-edit', state.canEdit);
+  document.body.classList.toggle('can-edit', state.isAdmin);
   $('#toolbar').hidden = state.view === 'manage';
   $('#datePick').value = state.view === 'hours' ? state.hoursDate : state.anchor;
-  const auth = $('#authBtn');
-  auth.hidden = !state.loginRequired;
-  auth.textContent = state.canEdit ? 'Log out' : 'Admin login';
+  const canSignIn = Boolean(state.oidc || state.password);
+  $('#authBtn').hidden = !canSignIn;
+  $('#authBtn').textContent = state.signedIn ? 'Sign out' : 'Sign in';
+  $('#profileBtn').hidden = !state.me?.person_id;
+  $('#who').hidden = !state.signedIn;
+  $('#who').innerHTML = state.me ? `<b>${esc(state.me.name || state.me.email)}</b>${state.me.role === 'admin' ? ' · admin' : ''}` : state.signedIn ? 'admin (password)' : '';
   renderFilter();
   tip.hidden = true;
   const run = { calendar: renderCalendar, hours: renderHours, manage: renderManage }[state.view];
@@ -825,14 +877,24 @@ tzInput.addEventListener('change', () => {
 });
 tzInput.addEventListener('focus', () => tzInput.select());
 
+// The person's zone for a brand-new account comes from the viewer's zone here.
+const ssoUrl = () => `/auth/login?tz=${encodeURIComponent(state.viewerTz)}`;
 $('#authBtn').addEventListener('click', async () => {
-  if (state.canEdit) { await api('POST', '/api/logout'); await loadData(); render(); return; }
+  if (state.signedIn) { await api('POST', '/api/logout'); await loadData(); render(); return; }
+  if (state.oidc && !state.password) { location.href = ssoUrl(); return; }
   $('#loginError').textContent = '';
   $('#loginForm').password.value = '';
+  const sso = $('#ssoLink');
+  sso.hidden = !state.oidc;
+  sso.textContent = state.oidc || '';
+  sso.href = ssoUrl();
+  $('#pwHint').hidden = !state.oidc;
   $('#loginDlg').showModal();
 });
+$('#profileBtn').addEventListener('click', () => openPerson(personById(state.me.person_id)));
 $('#loginForm').addEventListener('submit', async (ev) => {
   ev.preventDefault();
+  if (!ev.target.password.value) { $('#loginError').textContent = 'Enter the admin password.'; return; }
   try {
     await api('POST', '/api/login', { password: ev.target.password.value });
     $('#loginDlg').close(); await loadData(); render();
